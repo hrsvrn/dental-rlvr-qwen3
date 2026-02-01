@@ -1,0 +1,11 @@
+transformers
+accelerate
+trl
+peft
+bitsandbytes
+torch
+torchvision
+Pillow
+datasets
+qwen_vl_utils
+
