@@ -1,55 +1,58 @@
+import os
 import io
 from datasets import load_dataset, Image as HFImage
 from PIL import Image
 
 def get_dentex_dataset(split="train"):
-    print(f"--- Initializing Robust Dentex Loader ---")
+    # Path to the local files we just downloaded
+    local_base = "./dentex_data/DENTEX"
     
     data_files = {
-        "train": "DENTEX/training_data.zip",
-        "validation": "DENTEX/validation_data.zip",
-        "test": "DENTEX/test_data.zip"
+        "train": f"{local_base}/training_data.zip",
+        "validation": f"{local_base}/validation_data.zip",
+        "test": f"{local_base}/test_data.zip"
     }
 
+    # Verify files exist before loading
+    for name, path in data_files.items():
+        if not os.path.exists(path):
+            print(f"Error: Could not find {path}. Did you run the download step?")
+            return None
+
+    print(f"--- Loading Dentex from Local Folder ---")
     try:
-        # 1. Load the dataset 
-        ds = load_dataset(
-            "ibrahimhamamci/DENTEX", 
-            data_files=data_files, 
-            split=split
-        )
+        # We use the 'imagefolder' builder but point it to our local ZIPs
+        ds = load_dataset("imagefolder", data_files=data_files, split=split)
         
-        # 2. Turn OFF automatic decoding for the 'image' column to prevent crashing
-        # This allows us to inspect the bytes before PIL tries to identify them.
+        # Cast to raw bytes to filter out folder headers/junk
         ds = ds.cast_column("image", HFImage(decode=False))
-        
-        print(f"Initial count: {len(ds)} items. Cleaning dataset...")
 
         def is_valid_image(example):
+            img_dict = example["image"]
+            if not img_dict.get("bytes"):
+                return False
             try:
-                img_bytes = example["image"]["bytes"]
-                # Try to open and verify the image headers
-                Image.open(io.BytesIO(img_bytes)).verify()
+                # verify() is fast; it only checks the file header
+                Image.open(io.BytesIO(img_dict["bytes"])).verify()
                 return True
             except Exception:
                 return False
 
-        # 3. Filter out non-image files (.DS_Store, metadata, etc.)
+        print(f"Cleaning local dataset (removing non-image entries)...")
         ds = ds.filter(is_valid_image)
         
-        # 4. Turn decoding back ON for the valid images
+        # Re-enable PIL decoding for the model
         ds = ds.cast_column("image", HFImage(decode=True))
         
-        print(f"Final valid image count: {len(ds)}")
+        print(f"Successfully loaded {len(ds)} valid images.")
         return ds
-        
+
     except Exception as e:
-        print(f"\n[ERROR] Failed to load dataset: {e}")
+        print(f"Failed to load local dataset: {e}")
         return None
 
 if __name__ == "__main__":
-    # Test with a small slice
-    ds = get_dentex_dataset(split="train[:20]")
-    if ds and len(ds) > 0:
-        print(f"Success! Sample image format: {ds[0]['image'].format}")
-        print(f"Sample image size: {ds[0]['image'].size}")
+    # Testing with the first 50 images
+    ds = get_dentex_dataset(split="train[:50]")
+    if ds:
+        print(f"Sample Image Size: {ds[0]['image'].size}")
