@@ -1,58 +1,72 @@
 import os
 import io
+from huggingface_hub import snapshot_download
 from datasets import load_dataset, Image as HFImage
 from PIL import Image
 
-def get_dentex_dataset(split="train"):
-    # Path to the local files we just downloaded
-    local_base = "./dentex_data/DENTEX"
+def get_dentex_dataset(split="train", local_dir="./DENTEX_LOCAL"):
+    """
+    Downloads the dataset to a local folder and loads it into a 
+    Hugging Face Dataset object with robust image filtering.
+    """
     
+    # 1. DOWNLOAD PHASE
+    # Check if the training zip exists to avoid re-downloading
+    expected_zip = os.path.join(local_dir, "DENTEX/training_data.zip")
+    
+    if not os.path.exists(expected_zip):
+        print(f"Dataset not found at {local_dir}. Starting download...")
+        snapshot_download(
+            repo_id="ibrahimhamamci/DENTEX",
+            repo_type="dataset",
+            local_dir=local_dir,
+            local_dir_use_symlinks=False  # Physically copies files to the folder
+        )
+        print("Download complete.")
+    else:
+        print(f"Local dataset found at {local_dir}. Skipping download.")
+
+    # 2. LOADING PHASE
+    local_base = os.path.join(local_dir, "DENTEX")
     data_files = {
-        "train": f"{local_base}/training_data.zip",
-        "validation": f"{local_base}/validation_data.zip",
-        "test": f"{local_base}/test_data.zip"
+        "train": os.path.join(local_base, "training_data.zip"),
+        "validation": os.path.join(local_base, "validation_data.zip"),
+        "test": os.path.join(local_base, "test_data.zip")
     }
 
-    # Verify files exist before loading
-    for name, path in data_files.items():
-        if not os.path.exists(path):
-            print(f"Error: Could not find {path}. Did you run the download step?")
-            return None
-
-    print(f"--- Loading Dentex from Local Folder ---")
+    print(f"--- Loading Dentex Split: {split} ---")
     try:
-        # We use the 'imagefolder' builder but point it to our local ZIPs
+        # Load using the imagefolder builder
         ds = load_dataset("imagefolder", data_files=data_files, split=split)
         
-        # Cast to raw bytes to filter out folder headers/junk
+        # Disable automatic decoding to safely filter non-image entries
         ds = ds.cast_column("image", HFImage(decode=False))
 
-        def is_valid_image(example):
-            img_dict = example["image"]
-            if not img_dict.get("bytes"):
-                return False
-            try:
-                # verify() is fast; it only checks the file header
-                Image.open(io.BytesIO(img_dict["bytes"])).verify()
-                return True
-            except Exception:
-                return False
+        def is_real_image(example):
+            path = example["image"].get("path", "").lower()
+            # Verify file extension and exclude system-generated junk
+            is_img = path.endswith(('.png', '.jpg', '.jpeg'))
+            is_not_metadata = "__macosx" not in path and ".ds_store" not in path
+            return is_img and is_not_metadata
 
-        print(f"Cleaning local dataset (removing non-image entries)...")
-        ds = ds.filter(is_valid_image)
+        print("Filtering for valid dental X-ray files...")
+        ds = ds.filter(is_real_image)
         
-        # Re-enable PIL decoding for the model
+        # Enable PIL decoding for the model to use
         ds = ds.cast_column("image", HFImage(decode=True))
         
         print(f"Successfully loaded {len(ds)} valid images.")
         return ds
 
     except Exception as e:
-        print(f"Failed to load local dataset: {e}")
+        print(f"Error during loading: {e}")
         return None
 
 if __name__ == "__main__":
-    # Testing with the first 50 images
-    ds = get_dentex_dataset(split="train[:50]")
-    if ds:
-        print(f"Sample Image Size: {ds[0]['image'].size}")
+    # Example usage:
+    # First run will download 11GB+; subsequent runs will be near-instant.
+    dataset = get_dentex_dataset(split="train[:100]")
+    
+    if dataset:
+        print(f"Dataset columns: {dataset.column_names}")
+        print(f"First image metadata: {dataset[0]['image']}")
