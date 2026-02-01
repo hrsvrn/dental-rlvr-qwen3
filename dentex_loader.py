@@ -1,17 +1,31 @@
 import os
 from datasets import load_dataset
 from PIL import Image
+import io
+
+def is_valid_image(example):
+    """Checks if the image can actually be opened by PIL."""
+    try:
+        # The 'image' column contains a dict with 'bytes' or a PIL object
+        img_data = example.get("image")
+        if img_data is None:
+            return False
+            
+        # If it's already a PIL object, it's valid
+        if isinstance(img_data, Image.Image):
+            return True
+            
+        # If it's bytes, try to open it
+        if isinstance(img_data, dict) and "bytes" in img_data:
+            Image.open(io.BytesIO(img_data["bytes"])).verify()
+        
+        return True
+    except Exception:
+        return False
 
 def get_dentex_dataset(split="train"):
-    """
-    Loads the Dentex dataset by pointing directly to the ZIP archives 
-    found in the ibrahimhamamci/DENTEX repository.
-    """
-    print(f"--- Initializing Dentex Loader ---")
-    print(f"Target split: {split}")
+    print(f"--- Initializing Robust Dentex Loader ---")
     
-    # Define the mapping based on the file structure in your screenshots
-    # The 'imagefolder' loader will automatically extract these zips to your cache.
     data_files = {
         "train": "DENTEX/training_data.zip",
         "validation": "DENTEX/validation_data.zip",
@@ -19,43 +33,30 @@ def get_dentex_dataset(split="train"):
     }
 
     try:
-        # We specify 'imagefolder' to ensure it treats the ZIP contents as images
+        # Load without immediate decoding to prevent the identification error
         ds = load_dataset(
             "ibrahimhamamci/DENTEX", 
             data_files=data_files, 
-            split=split
+            split=split,
+            decode=False # <--- Key change: don't decode images immediately
         )
         
-        print(f"Successfully loaded {len(ds)} samples.")
-        print(f"Available columns: {ds.column_names}")
+        print(f"Initial count: {len(ds)} items. Cleaning dataset...")
         
-        # Basic sanity check: ensure 'image' column exists and is not empty
-        if "image" in ds.column_names:
-            ds = ds.filter(lambda x: x["image"] is not None)
+        # Filter out non-image files (like .txt, .json, or hidden system files)
+        ds = ds.filter(is_valid_image)
         
+        # Now that it's clean, we re-enable decoding
+        ds = ds.with_format("pil")
+        
+        print(f"Final valid image count: {len(ds)}")
         return ds
         
     except Exception as e:
-        print(f"\n[ERROR] Failed to load dataset.")
-        print(f"Details: {e}")
-        print("\nTip: Ensure you have enough disk space in ~/.cache/huggingface")
-        print("as the training zip is ~11GB and needs to be extracted.")
+        print(f"\n[ERROR] Failed to load dataset: {e}")
         return None
 
 if __name__ == "__main__":
-    # Test with a small slice to avoid massive extraction if just testing logic
-    # Note: The first run will still download the full ZIP.
-    dataset_sample = get_dentex_dataset(split="train[:5]")
-    
-    if dataset_sample:
-        sample = dataset_sample[0]
-        print("\n--- Sample Metadata ---")
-        print(f"Image Type: {type(sample['image'])}")
-        
-        # If the folder structure inside the zip has labels (e.g. /train/caries/img1.png)
-        # 'imagefolder' will automatically create a 'label' column.
-        if "label" in sample:
-            label_names = dataset_sample.features["label"].names
-            print(f"Label: {label_names[sample['label']]} ({sample['label']})")
-        
-        # sample['image'].show() # Uncomment to pop open the X-ray image
+    ds = get_dentex_dataset(split="train[:50]")
+    if ds and len(ds) > 0:
+        print("Success! First image size:", ds[0]["image"].size)
