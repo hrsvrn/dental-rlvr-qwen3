@@ -13,7 +13,7 @@ def get_dentex_dataset(local_dir="./DENTEX_LOCAL"):
             repo_id="ibrahimhamamci/DENTEX",
             repo_type="dataset",
             local_dir=local_dir,
-            local_dir_use_symlinks=False # Physical copy
+            local_dir_use_symlinks=False
         )
     
     # 2. CONFIGURATION
@@ -24,28 +24,34 @@ def get_dentex_dataset(local_dir="./DENTEX_LOCAL"):
 
     print(f"--- Loading and Scanning Entire Dataset ---")
     try:
-        # Load the FULL train split first to find where the images actually start
+        # Load the split
         ds = load_dataset("imagefolder", data_files=data_files, split="train")
         
-        # Cast to raw bytes for path inspection
+        # Cast to raw bytes to allow path string manipulation
         ds = ds.cast_column("image", HFImage(decode=False))
 
         def is_real_image(example):
+            # Based on your debug: zip://path/to/image.png::/absolute/path/to.zip
             path = example["image"].get("path", "").lower()
-            # We want actual image files, skipping the folder headers
-            return path.endswith(('.png', '.jpg', '.jpeg')) and "__macosx" not in path
+            
+            # Check for image extensions before the "::" separator
+            has_img_ext = any(ext in path for ext in ['.png', '.jpg', '.jpeg'])
+            # Ensure we don't accidentally pick up the .json files found in your debug
+            is_not_json = ".json" not in path
+            # Exclude system-generated junk
+            is_not_junk = "__macosx" not in path
+            
+            return has_img_ext and is_not_json and is_not_junk
 
-        # Filter the whole dataset to find ONLY the images
-        print("Scanning ZIP contents for valid X-rays (this may take a minute)...")
+        print("Scanning for valid X-rays using suffix-aware filtering...")
         ds_valid = ds.filter(is_real_image)
         
         if len(ds_valid) == 0:
-            print("DEBUG: No images found. First 5 paths seen in ZIP:")
-            for i in range(min(5, len(ds))):
-                print(f"  - {ds[i]['image']['path']}")
+            print("Still no images found. Checking first path seen:")
+            print(f"Path: {ds[0]['image']['path']}")
             return None
 
-        # Re-enable decoding for the valid subset
+        # Re-enable PIL decoding
         ds_valid = ds_valid.cast_column("image", HFImage(decode=True))
         
         print(f"Successfully loaded {len(ds_valid)} valid dental images.")
@@ -58,6 +64,5 @@ def get_dentex_dataset(local_dir="./DENTEX_LOCAL"):
 if __name__ == "__main__":
     dataset = get_dentex_dataset()
     if dataset:
-        # Now you can safely slice the VALID images
-        sample_slice = dataset.select(range(10))
-        print(f"First valid image size: {sample_slice[0]['image'].size}")
+        print(f"Success! Found {len(dataset)} images.")
+        print(f"Sample Image Size: {dataset[0]['image'].size}")
