@@ -1,105 +1,93 @@
+import os
+import io
 import torch
-from unsloth import FastVisionModel
-from transformers import AutoProcessor
+from huggingface_hub import snapshot_download
+from datasets import load_dataset, Image as HFImage
 from PIL import Image
-import requests
-from io import BytesIO
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from qwen_vl_utils import process_vision_info
 
-# Configuration
-MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
+# ==========================================
+# PART 1: ROBUST DENTEX LOADER
+# ==========================================
+def get_dentex_dataset(local_dir="./DENTEX_LOCAL"):
+    local_base = os.path.join(local_dir, "DENTEX")
+    if not os.path.exists(local_base):
+        print(f"Downloading dataset to {local_dir}...")
+        snapshot_download(repo_id="ibrahimhamamci/DENTEX", repo_type="dataset", 
+                          local_dir=local_dir, local_dir_use_symlinks=False)
+    
+    data_files = {"train": os.path.join(local_base, "training_data.zip")}
 
-def load_inference_engine():
-    print("Loading model...")
-    model, tokenizer = FastVisionModel.from_pretrained(
-        MODEL_ID,
-        load_in_4bit=True,
-        use_gradient_checkpointing="unsloth",
-        device_map="auto",
+    print(f"--- Loading and Scanning Dataset ---")
+    ds = load_dataset("imagefolder", data_files=data_files, split="train")
+    ds = ds.cast_column("image", HFImage(decode=False))
+
+    def is_real_image(example):
+        path = example["image"].get("path", "").lower()
+        # Suffix-aware check for the specific ZIP internal structure
+        return any(ext in path for ext in ['.png', '.jpg', '.jpeg']) and ".json" not in path
+
+    ds_valid = ds.filter(is_real_image)
+    ds_valid = ds_valid.cast_column("image", HFImage(decode=True))
+    print(f"Successfully loaded {len(ds_valid)} valid dental images.")
+    return ds_valid
+
+# ==========================================
+# PART 2: QWEN BASELINE INFERENCE
+# ==========================================
+def run_baseline(dataset, model_id="Qwen/Qwen2.5-VL-3B-Instruct"):
+    print(f"--- Initializing Model: {model_id} ---")
+    
+    # Load model with automatic precision and device mapping
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        model_id, torch_dtype="auto", device_map="auto"
     )
-    FastVisionModel.for_inference(model) # Enable native 2x faster inference
-    
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    return model, tokenizer, processor
+    processor = AutoProcessor.from_pretrained(model_id)
 
-def run_inference(model, processor, image_input, prompt_text="Identify the dental condition visible in this X-ray."):
-    """
-    Runs inference on a single image.
-    image_input: PIL Image object or path string.
-    """
-    # Load image if string
-    if isinstance(image_input, str):
-        if image_input.startswith("http"):
-            response = requests.get(image_input)
-            image = Image.open(BytesIO(response.content))
-        else:
-            image = Image.open(image_input)
-    else:
-        image = image_input
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt_text}
-            ]
-        }
-    ]
+    # Pick the first image from your 3603 valid images
+    sample = dataset[0]
+    image = sample["image"]
     
-    # Process
+    print(f"Testing inference on image: {getattr(image, 'filename', 'Memory Object')}")
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": "Describe the dental findings in this X-ray. Be specific about tooth enumeration and any visible caries."}
+        ],
+    }]
+
+    # Pre-process for Qwen
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    
     inputs = processor(
-        text=[text],
-        images=[image],
-        padding=True,
-        return_tensors="pt",
-    ).to("cuda")
+        text=[text], images=image_inputs, videos=video_inputs, 
+        padding=True, return_tensors="pt"
+    ).to(model.device)
 
-    # Generate
-    with torch.inference_mode():
-        generated_ids = model.generate(
-            **inputs, 
-            max_new_tokens=128,
-            use_cache=True,
-            temperature=0.2
-        )
-
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )
+    # Generate output
+    print("Generating response...")
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, max_new_tokens=256)
     
-    return output_text[0]
+    trimmed_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, generated_ids)]
+    output_text = processor.batch_decode(trimmed_ids, skip_special_tokens=True)[0]
 
-from dentex_loader import get_dentex_dataset
-from datasets import Dataset
+    print("\n" + "="*30)
+    print("QWEN ANALYSIS:")
+    print(output_text)
+    print("="*30)
 
+# ==========================================
+# EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    # Load Model
-    model, _, processor = load_inference_engine()
-    print("Engine loaded.")
+    # 1. Load the dataset (3603 images)
+    ds = get_dentex_dataset()
     
-    # Load Dataset
-    ds = get_dentex_dataset(split="train")
-    if not ds:
-        print("Could not load Dentex dataset.")
-        exit()
-        
-    print(f"Loaded {len(ds)} samples.")
-    
-    # Run Inference on first 3 samples
-    for i in range(3):
-        example = ds[i]
-        image = example["image"]
-        # Ground truth might be in 'label', 'text', or 'diagnosis' column. 
-        # Inspecting keys based on previous knowledge or just dumping all
-        ground_truth = str(example) 
-        
-        print(f"\n--- Sample {i} ---")
-        # print(f"Ground Truth Data: {ground_truth[:200]}...") # truncate for display
-        
-        result = run_inference(model, processor, image)
-        print(f"Prediction: {result}")
-
+    if ds and len(ds) > 0:
+        # 2. Run the Qwen test
+        run_baseline(ds)
